@@ -1,218 +1,1063 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+import torch
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from io import StringIO
 
-# C extensions
-*.so
+from botorch.models import SingleTaskGP
+from botorch.fit import fit_gpytorch_mll
+from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+from botorch.sampling import SobolQMCNormalSampler
+from botorch.utils.transforms import normalize
+from botorch.acquisition.monte_carlo import qExpectedImprovement
+from botorch.optim import optimize_acqf
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+from sklearn.metrics import r2_score, mean_squared_error
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+import numpy as np
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
+from gpytorch.constraints import GreaterThan
+from gpytorch.priors import GammaPrior
+from gpytorch.likelihoods import GaussianLikelihood
 
-# Translations
-*.mo
-*.pot
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+# ============================================================
+# GENERAL SETTINGS
+# ============================================================
 
-# Flask stuff:
-instance/
-.webassets-cache
+torch.set_default_dtype(torch.double)
 
-# Scrapy stuff:
-.scrapy
+sns.set_style("whitegrid")
 
-# Sphinx documentation
-docs/_build/
+plt.rcParams["font.family"] = "Times New Roman"
 
-# PyBuilder
-.pybuilder/
-target/
+# General font
+plt.rcParams["font.size"] = 24
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Figure text
+plt.rcParams["axes.titlesize"] = 20
+plt.rcParams["axes.labelsize"] = 24
+plt.rcParams["legend.fontsize"] = 14
 
-# IPython
-profile_default/
-ipython_config.py
+# Tick labels
+plt.rcParams["xtick.labelsize"] = 20
+plt.rcParams["ytick.labelsize"] = 20
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+# Resolution
+plt.rcParams["figure.dpi"] = 100
+plt.rcParams["savefig.dpi"] = 300
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+# ============================================================
+# SHARED GAMMA PRIOR
+# ============================================================
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+LENGTHSCALE_PRIOR = GammaPrior(
+    3.0,
+    6.0
+)
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
-.pdm-python
-.pdm-build/
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
+# ============================================================
+# EXPERIMENTAL BOUNDS
+# ============================================================
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+bounds = torch.tensor(
+    [
+        [50.0, 5.0, 15.0],
+        [100.0, 15.0, 35.0]
+    ],
+    dtype=torch.double
+)
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
 
-# Redis
-*.rdb
-*.aof
-*.pid
+param_names = [
+    "Amplitude (%)",
+    "Time (min)",
+    "Ratio (1:R)"
+]
 
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
+output_name = "Yield"
 
-# ActiveMQ
-activemq-data/
 
-# SageMath parsed files
-*.sage.py
+# ============================================================
+# DATA
+# ============================================================
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+data = """Amplitude,Time,Ratio,Yield
+50,5,25,27.78
+100,5,25,22.32
+50,15,25,30.94
+50,15,23,28.19
+100,15,25,24.64
+50,10,15,23.09
+100,10,15,22.86
+50,15,35,25.45
+50,10,35,24.62
+100,10,35,17.28
+70,5,15,11.77
+70,15,15,12.6
+70,5,35,14.62
+70,15,35,15.6
+70,10,25,17.01
+70,10,25,16.88
+70,10,25,16.73
+"""
 
-# Spyder project settings
-.spyderproject
-.spyproject
+df = pd.read_csv(
+    StringIO(data)
+)
 
-# Rope project settings
-.ropeproject
 
-# mkdocs documentation
-/site
+# ============================================================
+# TRAINING INPUTS
+# ============================================================
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+X_train = torch.tensor(
+    df[
+        [
+            "Amplitude",
+            "Time",
+            "Ratio"
+        ]
+    ].values,
+    dtype=torch.double
+)
 
-# Pyre type checker
-.pyre/
 
-# pytype static type analyzer
-.pytype/
+# ============================================================
+# TRAINING OUTPUT
+# ============================================================
 
-# Cython debug symbols
-cython_debug/
+Y_train = torch.tensor(
+    df[["Yield"]].values,
+    dtype=torch.double
+)
 
-# PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
 
-# Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
-.abstra/
+# ============================================================
+# NORMALIZE INPUTS
+# ============================================================
 
-# Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#   you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
+X_norm = normalize(
+    X_train,
+    bounds=bounds
+).clamp(
+    1e-6,
+    1 - 1e-6
+)
 
-# Ruff stuff:
-.ruff_cache/
 
-# PyPI configuration file
-.pypirc
+# ============================================================
+# STANDARDIZE OUTPUT
+# ============================================================
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+Y_mean = Y_train.mean()
 
-# Streamlit
-.streamlit/secrets.toml
+Y_std = Y_train.std()
+
+Y_norm = (
+    Y_train - Y_mean
+) / Y_std
+
+
+# ============================================================
+# GAUSSIAN LIKELIHOOD
+# ============================================================
+
+likelihood = GaussianLikelihood(
+    noise=torch.tensor(0.05),
+    noise_constraint=GreaterThan(1e-2)
+)
+
+
+# ============================================================
+# SINGLE-TASK GP
+# ============================================================
+
+gp = SingleTaskGP(
+    X_norm,
+    Y_norm,
+    likelihood=likelihood
+)
+
+
+# ============================================================
+# GAMMA LENGTH-SCALE PRIOR
+# ============================================================
+
+if hasattr(
+    gp.covar_module,
+    "base_kernel"
+):
+
+    gp.covar_module.base_kernel.lengthscale_prior = (
+        LENGTHSCALE_PRIOR
+    )
+
+else:
+
+    gp.covar_module.lengthscale_prior = (
+        LENGTHSCALE_PRIOR
+    )
+
+
+# ============================================================
+# EXACT MARGINAL LOG LIKELIHOOD
+# ============================================================
+
+mll = ExactMarginalLogLikelihood(
+    gp.likelihood,
+    gp
+)
+
+
+fit_gpytorch_mll(
+    mll
+)
+
+gp.eval()
+
+
+# ============================================================
+# TRAINING POSTERIOR
+# ============================================================
+
+with torch.no_grad():
+
+    post_train = gp.posterior(
+        X_norm
+    )
+
+    Y_pred = (
+        post_train.mean
+        * Y_std
+        + Y_mean
+    )
+
+
+# ============================================================
+# TRAINING METRICS
+# ============================================================
+
+y_true = (
+    Y_train
+    .numpy()
+    .flatten()
+)
+
+y_pred = (
+    Y_pred
+    .numpy()
+    .flatten()
+)
+
+
+R2 = r2_score(
+    y_true,
+    y_pred
+)
+
+
+RMSE_train = np.sqrt(
+    mean_squared_error(
+        y_true,
+        y_pred
+    )
+)
+
+
+# ============================================================
+# LEAVE-ONE-OUT CROSS VALIDATION
+# ============================================================
+
+y_pred_loo = []
+
+
+for i in range(
+    len(X_train)
+):
+
+    mask = torch.ones(
+        len(X_train),
+        dtype=torch.bool
+    )
+
+    mask[i] = False
+
+
+    X_loo = X_norm[
+        mask
+    ]
+
+    Y_loo = Y_norm[
+        mask
+    ]
+
+
+    # Same likelihood as main model
+    likelihood_loo = GaussianLikelihood(
+        noise=torch.tensor(0.05),
+        noise_constraint=GreaterThan(1e-2)
+    )
+
+
+    gp_loo = SingleTaskGP(
+        X_loo,
+        Y_loo,
+        likelihood=likelihood_loo
+    )
+
+
+    # Same prior
+    if hasattr(
+        gp_loo.covar_module,
+        "base_kernel"
+    ):
+
+        gp_loo.covar_module.base_kernel.lengthscale_prior = (
+            LENGTHSCALE_PRIOR
+        )
+
+    else:
+
+        gp_loo.covar_module.lengthscale_prior = (
+            LENGTHSCALE_PRIOR
+        )
+
+
+    # LOOCV MLL
+    mll_loo = ExactMarginalLogLikelihood(
+        gp_loo.likelihood,
+        gp_loo
+    )
+
+
+    fit_gpytorch_mll(
+        mll_loo
+    )
+
+    gp_loo.eval()
+
+
+    with torch.no_grad():
+
+        pred = gp_loo.posterior(
+            X_norm[
+                i
+            ].unsqueeze(0)
+        ).mean
+
+
+        y_pred_loo.append(
+            (
+                pred
+                * Y_std
+                + Y_mean
+            ).item()
+        )
+
+
+# ============================================================
+# LOOCV STATISTICS
+# ============================================================
+
+y_pred_loo = np.array(
+    y_pred_loo
+)
+
+
+PRESS = np.sum(
+    (
+        y_true
+        - y_pred_loo
+    ) ** 2
+)
+
+
+TSS = np.sum(
+    (
+        y_true
+        - np.mean(y_true)
+    ) ** 2
+)
+
+
+Q2 = (
+    1
+    - PRESS / TSS
+)
+
+
+RMSE_LOOCV = np.sqrt(
+    mean_squared_error(
+        y_true,
+        y_pred_loo
+    )
+)
+
+
+# ============================================================
+# PRINT MODEL VALIDATION
+# ============================================================
+
+print(
+    "\n=============================="
+)
+
+print(
+    "MODEL VALIDATION METRICS"
+)
+
+print(
+    "=============================="
+)
+
+print(
+    f"R²            = {R2:.4f}"
+)
+
+
+
+print(
+    f"RMSE (Train)  = {RMSE_train:.4f}"
+)
+
+
+
+
+# ============================================================
+# BAYESIAN OPTIMIZATION
+# ============================================================
+
+# Keep your original QMC sampler
+sampler = SobolQMCNormalSampler(
+    sample_shape=torch.Size([128])
+)
+
+
+# Keep qExpectedImprovement
+acq_func = qExpectedImprovement(
+    model=gp,
+    best_f=Y_norm.max().item(),
+    sampler=sampler
+)
+
+
+# Keep your original optimizer settings
+candidate, _ = optimize_acqf(
+    acq_function=acq_func,
+
+    bounds=torch.tensor(
+        [
+            [0., 0., 0.],
+            [1., 1., 1.]
+        ],
+        dtype=torch.double
+    ),
+
+    q=1,
+
+    num_restarts=10,
+
+    raw_samples=50
+)
+
+
+# ============================================================
+# NORMALIZED NEXT POINT
+# ============================================================
+
+next_norm = candidate.detach()
+
+
+# ============================================================
+# CONVERT TO REAL EXPERIMENTAL CONDITIONS
+# ============================================================
+
+next_run = (
+    bounds[0]
+    + (
+        bounds[1]
+        - bounds[0]
+    )
+    * next_norm
+)
+
+
+next_run_np = (
+    next_run
+    .numpy()
+    .flatten()
+)
+
+
+# ============================================================
+# POSTERIOR AT BO CANDIDATE
+# ============================================================
+
+with torch.no_grad():
+
+    post = gp.posterior(
+        next_norm
+    )
+
+
+    pred_mean = (
+        post.mean.item()
+        * Y_std.item()
+        + Y_mean.item()
+    )
+
+
+    pred_std = (
+        post.variance.sqrt().item()
+        * Y_std.item()
+    )
+
+
+    # Approximately 95% Gaussian posterior interval
+    ci_lower = (
+        pred_mean
+        - 1.96 * pred_std
+    )
+
+
+    ci_upper = (
+        pred_mean
+        + 1.96 * pred_std
+    )
+
+
+# ============================================================
+# PRINT BO RESULT
+# ============================================================
+
+print(
+    "\n=============================="
+)
+
+print(
+    "SUGGESTED NEXT EXPERIMENT"
+)
+
+print(
+    "=============================="
+)
+
+
+for i, n in enumerate(
+    param_names
+):
+
+    print(
+        f"{n}: "
+        f"{next_run_np[i]:.2f}"
+    )
+
+
+print(
+    f"{output_name} Prediction: "
+    f"{pred_mean:.2f}"
+)
+
+
+print(
+    f"Posterior SD: "
+    f"{pred_std:.2f}"
+)
+
+
+print(
+    f"95% CI: "
+    f"[{ci_lower:.2f}, {ci_upper:.2f}]"
+)
+
+
+# ============================================================
+# GRADIENT CONFIDENCE BAND
+# ============================================================
+
+def gradient_fill(
+    x,
+    y1,
+    y2,
+    ax,
+    cmap_name="Blues",
+    alpha_range=(0.1, 0.4)
+):
+
+    n = len(x)
+
+    for i in range(
+        n - 1
+    ):
+
+        ax.fill_between(
+            x[i:i + 2],
+
+            y1[i:i + 2],
+
+            y2[i:i + 2],
+
+            color=plt.get_cmap(
+                cmap_name
+            )(
+                (i / n) * 0.6
+                + 0.2
+            ),
+
+            alpha=(
+                (i / n)
+                * (
+                    alpha_range[1]
+                    - alpha_range[0]
+                )
+                + alpha_range[0]
+            )
+        )
+
+
+
+
+for i in range(3):
+
+
+
+    grid = torch.linspace(
+        0,
+        1,
+        200
+    )
+
+
+
+    base = next_norm.repeat(
+        200,
+        1
+    )
+
+
+  
+
+    base[:, i] = grid
+
+
+
+    with torch.no_grad():
+
+        post = gp.posterior(
+            base
+        )
+
+
+        mean_grid = (
+            post.mean.flatten()
+            * Y_std
+            + Y_mean
+        )
+
+
+        std_grid = (
+            post.variance.sqrt().flatten()
+            * Y_std
+        )
+
+
+        ei_grid = (
+            acq_func(
+                base.unsqueeze(-2)
+            )
+            .flatten()
+            .numpy()
+        )
+
+
+    # --------------------------------------------------------
+    # Convert normalized x to real units
+    # --------------------------------------------------------
+
+    x_real = (
+        bounds[0, i]
+        + (
+            bounds[1, i]
+            - bounds[0, i]
+        )
+        * grid
+    )
+
+
+    # ========================================================
+    # GP POSTERIOR PLOT
+    # ========================================================
+
+    fig, ax = plt.subplots(
+        figsize=(4, 3)
+    )
+
+
+    # --------------------------------------------------------
+    # ±1 SD
+    # --------------------------------------------------------
+
+    gradient_fill(
+        x_real,
+
+        mean_grid
+        - std_grid,
+
+        mean_grid
+        + std_grid,
+
+        ax,
+
+        cmap_name="Blues",
+
+        alpha_range=(
+            0.25,
+            0.45
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # ±2 SD
+    # --------------------------------------------------------
+
+    gradient_fill(
+        x_real,
+
+        mean_grid
+        - 2 * std_grid,
+
+        mean_grid
+        + 2 * std_grid,
+
+        ax,
+
+        cmap_name="Blues",
+
+        alpha_range=(
+            0.15,
+            0.30
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # ±3 SD
+    # --------------------------------------------------------
+
+    gradient_fill(
+        x_real,
+
+        mean_grid
+        - 3 * std_grid,
+
+        mean_grid
+        + 3 * std_grid,
+
+        ax,
+
+        cmap_name="Blues",
+
+        alpha_range=(
+            0.05,
+            0.18
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # GP MEAN
+    # --------------------------------------------------------
+
+    ax.plot(
+        x_real,
+
+        mean_grid,
+
+        color="#0033A0",
+
+        linewidth=3,
+
+        label="GP Mean"
+    )
+
+
+    
+
+    ax.scatter(
+        X_train[
+            :,
+            i
+        ].numpy(),
+
+        Y_train.numpy().flatten(),
+
+        color="black",
+
+        s=45,
+
+        alpha=0.35,
+
+        label="Experimental Data"
+    )
+
+
+    # --------------------------------------------------------
+    # BO NEXT POINT
+    # --------------------------------------------------------
+
+    ax.scatter(
+        next_run_np[i],
+
+        pred_mean,
+
+        color="#7A0000",
+
+        s=120,
+
+        marker="o",
+
+        edgecolors="black",
+
+        linewidth=1.2,
+
+        zorder=6,
+
+        label="Next Point"
+    )
+
+
+    # --------------------------------------------------------
+    # LABELS
+    # --------------------------------------------------------
+
+    ax.set_xlabel(
+        param_names[i],
+
+        fontsize=24
+    )
+
+
+    ax.set_ylabel(
+        output_name,
+
+        fontsize=24
+    )
+
+
+    
+
+
+    # --------------------------------------------------------
+    # TICKS
+    # --------------------------------------------------------
+
+    ax.tick_params(
+        axis="both",
+
+        labelsize=20
+    )
+
+
+    # --------------------------------------------------------
+    # GRID
+    # --------------------------------------------------------
+
+    ax.grid(
+        alpha=0.3
+    )
+
+
+    # --------------------------------------------------------
+    # LEGEND
+    # --------------------------------------------------------
+
+    ax.legend(
+        fontsize=12,
+
+        frameon=True,
+
+        loc="best"
+    )
+
+
+    fig.tight_layout()
+
+
+    # --------------------------------------------------------
+    # SAVE 300 DPI
+    # --------------------------------------------------------
+
+    clean_name = (
+        param_names[i]
+        .replace(" ", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("%", "percent")
+        .replace(":", "")
+    )
+
+
+    fig.savefig(
+        f"GP_Posterior_{clean_name}.png",
+
+        dpi=300,
+
+        bbox_inches="tight"
+    )
+
+
+    # ========================================================
+    # qEI PLOT
+    # ========================================================
+
+    fig, ax = plt.subplots(
+        figsize=(4, 3)
+    )
+
+
+    # --------------------------------------------------------
+    # qEI AREA
+    # --------------------------------------------------------
+
+    ax.fill_between(
+        x_real,
+
+        0,
+
+        ei_grid,
+
+        color="#FF6F61",
+
+        alpha=0.25
+    )
+
+
+    # --------------------------------------------------------
+    # qEI CURVE
+    # --------------------------------------------------------
+
+    ax.plot(
+        x_real,
+
+        ei_grid,
+
+        color="#8B0000",
+
+        linewidth=2.5,
+
+        label="qExpected Improvement"
+    )
+
+
+    # --------------------------------------------------------
+    # qEI AT GLOBAL BO CANDIDATE
+    # --------------------------------------------------------
+
+    selected_ei = (
+        acq_func(
+            next_norm.unsqueeze(0)
+        )
+        .item()
+    )
+
+
+    ax.scatter(
+        next_run_np[i],
+
+        selected_ei,
+
+        color="#7A0000",
+
+        s=110,
+
+        marker="o",
+
+        edgecolors="black",
+
+        linewidth=1,
+
+        zorder=5,
+
+        label="Next Point"
+    )
+
+
+    # --------------------------------------------------------
+    # LABELS
+    # --------------------------------------------------------
+
+    ax.set_xlabel(
+        param_names[i],
+
+        fontsize=24
+    )
+
+
+    ax.set_ylabel(
+        "qExpected Improvement",
+
+        fontsize=20
+    )
+
+
+
+    ax.tick_params(
+        axis="both",
+
+        labelsize=18
+    )
+
+
+    ax.grid(
+        alpha=0.2
+    )
+
+
+    ax.legend(
+        fontsize=12,
+
+        frameon=True,
+
+        loc="best"
+    )
+
+
+    fig.tight_layout()
+
+
+    # --------------------------------------------------------
+    # SAVE qEI FIGURE AT 300 DPI
+    # --------------------------------------------------------
+
+    fig.savefig(
+        f"EI_{clean_name}.png",
+
+        dpi=300,
+
+        bbox_inches="tight"
+    )
+
+
+# ============================================================
+# DISPLAY
+# ============================================================
+
+plt.show()
+
+
+# ============================================================
+# FINISHED
+# ============================================================
+
+print(
+    "\nBayesian Optimization Finished!"
+)
+
+print(
+    "Figures saved at 300 DPI."
+)
