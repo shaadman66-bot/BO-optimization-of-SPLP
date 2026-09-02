@@ -21,6 +21,8 @@ from gpytorch.constraints import GreaterThan
 from gpytorch.priors import GammaPrior
 from gpytorch.likelihoods import GaussianLikelihood
 
+from scipy.interpolate import RBFInterpolator
+
 
 # ============================================================
 # GENERAL SETTINGS
@@ -419,12 +421,9 @@ print(
 )
 
 
-
 print(
     f"RMSE (Train)  = {RMSE_train:.4f}"
 )
-
-
 
 
 # ============================================================
@@ -619,11 +618,11 @@ def gradient_fill(
         )
 
 
-
+# ============================================================
+# ORIGINAL 1D GP + qEI PLOTS
+# ============================================================
 
 for i in range(3):
-
-
 
     grid = torch.linspace(
         0,
@@ -632,17 +631,13 @@ for i in range(3):
     )
 
 
-
     base = next_norm.repeat(
         200,
         1
     )
 
 
-  
-
     base[:, i] = grid
-
 
 
     with torch.no_grad():
@@ -786,8 +781,6 @@ for i in range(3):
     )
 
 
-    
-
     ax.scatter(
         X_train[
             :,
@@ -847,9 +840,6 @@ for i in range(3):
 
         fontsize=24
     )
-
-
-    
 
 
     # --------------------------------------------------------
@@ -1005,7 +995,6 @@ for i in range(3):
     )
 
 
-
     ax.tick_params(
         axis="both",
 
@@ -1044,14 +1033,14 @@ for i in range(3):
 
 
 # ============================================================
-# DISPLAY
+# DISPLAY ORIGINAL FIGURES
 # ============================================================
 
 plt.show()
 
 
 # ============================================================
-# FINISHED
+# FINISHED ORIGINAL ANALYSIS
 # ============================================================
 
 print(
@@ -1060,4 +1049,727 @@ print(
 
 print(
     "Figures saved at 300 DPI."
+)
+
+
+# ============================================================
+# ============================================================
+# 4-PANEL BAYESIAN OPTIMIZATION RESPONSE-SURFACE FIGURE
+# ============================================================
+#
+# X-axis = Amplitude
+# Y-axis = Time
+#
+# Ratio is fixed at the BO-suggested value.
+#
+# Panels:
+# 1. Mean prediction
+# 2. True function / experimental response surface
+# 3. Prediction uncertainty
+# 4. Acquisition function
+# ============================================================
+
+
+# ============================================================
+# GRID SETTINGS
+# ============================================================
+
+n_grid = 150
+
+
+amplitude_grid = torch.linspace(
+    bounds[0, 0],
+    bounds[1, 0],
+    n_grid
+)
+
+
+time_grid = torch.linspace(
+    bounds[0, 1],
+    bounds[1, 1],
+    n_grid
+)
+
+
+A, T = torch.meshgrid(
+    amplitude_grid,
+    time_grid,
+    indexing="xy"
+)
+
+
+# ============================================================
+# FIX RATIO AT BO-SUGGESTED VALUE
+# ============================================================
+
+fixed_ratio = next_run_np[2]
+
+
+# ============================================================
+# CREATE 2D GRID IN REAL EXPERIMENTAL UNITS
+# ============================================================
+
+grid_real = torch.column_stack(
+    [
+        A.reshape(-1),
+
+        T.reshape(-1),
+
+        torch.full(
+            (
+                n_grid * n_grid,
+            ),
+
+            fixed_ratio,
+
+            dtype=torch.double
+        )
+    ]
+)
+
+
+# ============================================================
+# NORMALIZE GRID
+# ============================================================
+
+grid_norm = normalize(
+    grid_real,
+
+    bounds=bounds
+).clamp(
+    1e-6,
+    1 - 1e-6
+)
+
+
+# ============================================================
+# GP POSTERIOR ON 2D GRID
+# ============================================================
+
+with torch.no_grad():
+
+    grid_posterior = gp.posterior(
+        grid_norm
+    )
+
+
+    mean_surface = (
+        grid_posterior.mean.flatten()
+        * Y_std
+        + Y_mean
+    )
+
+
+    uncertainty_surface = (
+        grid_posterior.variance.sqrt().flatten()
+        * Y_std
+    )
+
+
+# ============================================================
+# qEI ON 2D GRID
+# ============================================================
+
+with torch.no_grad():
+
+    qei_surface = (
+        acq_func(
+            grid_norm.unsqueeze(-2)
+        )
+        .flatten()
+        .numpy()
+    )
+
+
+# ============================================================
+# CONVERT GP RESULTS TO NUMPY
+# ============================================================
+
+mean_surface = (
+    mean_surface
+    .numpy()
+    .reshape(
+        n_grid,
+        n_grid
+    )
+)
+
+
+uncertainty_surface = (
+    uncertainty_surface
+    .numpy()
+    .reshape(
+        n_grid,
+        n_grid
+    )
+)
+
+
+qei_surface = (
+    qei_surface
+    .reshape(
+        n_grid,
+        n_grid
+    )
+)
+
+
+A_np = A.numpy()
+
+T_np = T.numpy()
+
+
+# ============================================================
+# EXPERIMENTAL RESPONSE SURFACE
+# ============================================================
+#
+# Since there is no mathematical analytical true function
+# supplied with the experimental dataset, the experimental
+# observations are interpolated to generate the response
+# surface.
+#
+# This represents the experimental response surface rather
+# than a mathematically known ground-truth function.
+# ============================================================
+
+experimental_X = df[
+    [
+        "Amplitude",
+        "Time"
+    ]
+].values
+
+
+experimental_Y = df[
+    "Yield"
+].values
+
+
+# ============================================================
+# AVERAGE DUPLICATED EXPERIMENTAL CONDITIONS
+# ============================================================
+
+experimental_df = (
+    df[
+        [
+            "Amplitude",
+            "Time",
+            "Yield"
+        ]
+    ]
+    .groupby(
+        [
+            "Amplitude",
+            "Time"
+        ],
+        as_index=False
+    )
+    .mean()
+)
+
+
+experimental_X_unique = (
+    experimental_df[
+        [
+            "Amplitude",
+            "Time"
+        ]
+    ]
+    .values
+)
+
+
+experimental_Y_unique = (
+    experimental_df[
+        "Yield"
+    ]
+    .values
+)
+
+
+# ============================================================
+# RBF INTERPOLATION
+# ============================================================
+
+rbf = RBFInterpolator(
+    experimental_X_unique,
+
+    experimental_Y_unique,
+
+    kernel="thin_plate_spline",
+
+    smoothing=0.5
+)
+
+
+experimental_surface = rbf(
+    np.column_stack(
+        [
+            A_np.ravel(),
+
+            T_np.ravel()
+        ]
+    )
+).reshape(
+    n_grid,
+    n_grid
+)
+
+
+# ============================================================
+# 4-PANEL FIGURE
+# ============================================================
+
+fig, axes = plt.subplots(
+    2,
+    2,
+
+    figsize=(
+        12,
+        10
+    )
+)
+
+
+# ============================================================
+# PANEL 1 — MEAN PREDICTION
+# ============================================================
+
+ax = axes[0, 0]
+
+
+contour1 = ax.contourf(
+    A_np,
+
+    T_np,
+
+    mean_surface,
+
+    levels=100,
+
+    cmap="jet"
+)
+
+
+# Experimental points
+
+ax.scatter(
+    df["Amplitude"],
+
+    df["Time"],
+
+    c="black",
+
+    s=45,
+
+    edgecolors="white",
+
+    linewidths=0.8,
+
+    zorder=5
+)
+
+
+# BO suggested point
+
+ax.scatter(
+    next_run_np[0],
+
+    next_run_np[1],
+
+    c="white",
+
+    s=120,
+
+    marker="*",
+
+    edgecolors="black",
+
+    linewidths=1.2,
+
+    zorder=6
+)
+
+
+ax.set_title(
+    "Mean prediction",
+
+    fontsize=20
+)
+
+
+ax.set_xlabel(
+    "Amplitude (%)",
+
+    fontsize=20
+)
+
+
+ax.set_ylabel(
+    "Time (min)",
+
+    fontsize=20
+)
+
+
+ax.tick_params(
+    axis="both",
+
+    labelsize=16
+)
+
+
+cbar1 = fig.colorbar(
+    contour1,
+
+    ax=ax
+)
+
+
+cbar1.ax.tick_params(
+    labelsize=14
+)
+
+
+# ============================================================
+# PANEL 2 — EXPERIMENTAL RESPONSE SURFACE
+# ============================================================
+
+ax = axes[0, 1]
+
+
+contour2 = ax.contourf(
+    A_np,
+
+    T_np,
+
+    experimental_surface,
+
+    levels=100,
+
+    cmap="jet"
+)
+
+
+# Experimental points
+
+ax.scatter(
+    df["Amplitude"],
+
+    df["Time"],
+
+    c="black",
+
+    s=45,
+
+    edgecolors="white",
+
+    linewidths=0.8,
+
+    zorder=5
+)
+
+
+ax.set_title(
+    "True function",
+
+    fontsize=20
+)
+
+
+ax.set_xlabel(
+    "Amplitude (%)",
+
+    fontsize=20
+)
+
+
+ax.set_ylabel(
+    "Time (min)",
+
+    fontsize=20
+)
+
+
+ax.tick_params(
+    axis="both",
+
+    labelsize=16
+)
+
+
+cbar2 = fig.colorbar(
+    contour2,
+
+    ax=ax
+)
+
+
+cbar2.ax.tick_params(
+    labelsize=14
+)
+
+
+# ============================================================
+# PANEL 3 — PREDICTION UNCERTAINTY
+# ============================================================
+
+ax = axes[1, 0]
+
+
+contour3 = ax.contourf(
+    A_np,
+
+    T_np,
+
+    uncertainty_surface,
+
+    levels=100,
+
+    cmap="jet"
+)
+
+
+# Experimental points
+
+ax.scatter(
+    df["Amplitude"],
+
+    df["Time"],
+
+    c="black",
+
+    s=45,
+
+    edgecolors="white",
+
+    linewidths=0.8,
+
+    zorder=5
+)
+
+
+# BO suggested point
+
+ax.scatter(
+    next_run_np[0],
+
+    next_run_np[1],
+
+    c="white",
+
+    s=120,
+
+    marker="*",
+
+    edgecolors="black",
+
+    linewidths=1.2,
+
+    zorder=6
+)
+
+
+ax.set_title(
+    "Prediction uncertainty",
+
+    fontsize=20
+)
+
+
+ax.set_xlabel(
+    "Amplitude (%)",
+
+    fontsize=20
+)
+
+
+ax.set_ylabel(
+    "Time (min)",
+
+    fontsize=20
+)
+
+
+ax.tick_params(
+    axis="both",
+
+    labelsize=16
+)
+
+
+cbar3 = fig.colorbar(
+    contour3,
+
+    ax=ax
+)
+
+
+cbar3.ax.tick_params(
+    labelsize=14
+)
+
+
+# ============================================================
+# PANEL 4 — ACQUISITION FUNCTION
+# ============================================================
+
+ax = axes[1, 1]
+
+
+contour4 = ax.contourf(
+    A_np,
+
+    T_np,
+
+    qei_surface,
+
+    levels=100,
+
+    cmap="jet"
+)
+
+
+# Experimental points
+
+ax.scatter(
+    df["Amplitude"],
+
+    df["Time"],
+
+    c="black",
+
+    s=45,
+
+    edgecolors="white",
+
+    linewidths=0.8,
+
+    zorder=5
+)
+
+
+# BO suggested point
+
+ax.scatter(
+    next_run_np[0],
+
+    next_run_np[1],
+
+    c="white",
+
+    s=120,
+
+    marker="*",
+
+    edgecolors="black",
+
+    linewidths=1.2,
+
+    zorder=6
+)
+
+
+ax.set_title(
+    "Acquisition function",
+
+    fontsize=20
+)
+
+
+ax.set_xlabel(
+    "Amplitude (%)",
+
+    fontsize=20
+)
+
+
+ax.set_ylabel(
+    "Time (min)",
+
+    fontsize=20
+)
+
+
+ax.tick_params(
+    axis="both",
+
+    labelsize=16
+)
+
+
+cbar4 = fig.colorbar(
+    contour4,
+
+    ax=ax
+)
+
+
+cbar4.ax.tick_params(
+    labelsize=14
+)
+
+
+# ============================================================
+# OVERALL TITLE
+# ============================================================
+
+fig.suptitle(
+    f"Bayesian Optimization Surface "
+    f"(Ratio = {fixed_ratio:.2f})",
+
+    fontsize=22,
+
+    y=0.995
+)
+
+
+# ============================================================
+# LAYOUT
+# ============================================================
+
+fig.tight_layout(
+    rect=[
+        0,
+        0,
+        1,
+        0.97
+    ]
+)
+
+
+# ============================================================
+# SAVE 4-PANEL FIGURE
+# ============================================================
+
+fig.savefig(
+    "BO_4_Panel_Response_Surface.png",
+
+    dpi=300,
+
+    bbox_inches="tight"
+)
+
+
+# ============================================================
+# DISPLAY 4-PANEL FIGURE
+# ============================================================
+
+plt.show()
+
+
+# ============================================================
+# FINAL MESSAGE
+# ============================================================
+
+print(
+    "\n4-panel Bayesian Optimization figure generated!"
+)
+
+print(
+    "Saved as: BO_4_Panel_Response_Surface.png"
+)
+
+print(
+    "Resolution: 300 DPI"
 )
